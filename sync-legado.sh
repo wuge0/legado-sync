@@ -47,13 +47,20 @@ for entry in "${map[@]}"; do
     echo "  无新更新，跳过同步"; skipped=$((skipped+1)); continue
   fi
 
-  echo "  检测到上游更新，同步中..."
-  if git clone --mirror "https://github.com/$src.git" "$TMP/${tgt}.git" >/dev/null 2>&1 \
-     && git -C "$TMP/${tgt}.git" push "https://oauth2:${GH_TOKEN}@github.com/$OWNER/$tgt.git" \
-          'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*' >/dev/null 2>&1; then
-    echo "  同步完成（分支/标签已更新）"; synced=$((synced+1))
+  echo "  检测到引用差异，对账同步中..."
+  if git clone --mirror "https://github.com/$src.git" "$TMP/${tgt}.git" >/dev/null 2>&1; then
+    # 删除 refs/pull 隐藏引用（GitHub 不允许推送，避免镜像 push 失败）
+    git -C "$TMP/${tgt}.git" for-each-ref 'refs/pull/**' --format='delete %(refname)' \
+      | git -C "$TMP/${tgt}.git" update-ref --stdin
+    # --mirror 双向对账：增补源有的 / 更新落后的 / 删除目标多余分支(如已清理的 dependabot)
+    if git -C "$TMP/${tgt}.git" push --mirror \
+         "https://oauth2:${GH_TOKEN}@github.com/$OWNER/$tgt.git" >/dev/null 2>&1; then
+      echo "  同步完成（双向对齐，含删除目标多余分支）"; synced=$((synced+1))
+    else
+      echo "  同步失败"; failed=$((failed+1))
+    fi
   else
-    echo "  同步失败"; failed=$((failed+1))
+    echo "  克隆源失败"; failed=$((failed+1))
   fi
 done
 
