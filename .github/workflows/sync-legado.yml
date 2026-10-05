@@ -1,0 +1,22 @@
+name: Sync Legado Mirrors
+
+on:
+  schedule:
+    # 每天 UTC 02:00（北京时间 10:00）检查一次，有更新才同步
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+# 只读默认；推送用 PAT(secrets.LEGADO_PAT) 完成，脚本内已内嵌认证
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run unified sync
+        env:
+          GH_TOKEN: ${{ secrets.LEGADO_PAT }}
+        run: bash sync-legado.sh
