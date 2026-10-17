@@ -12,7 +12,7 @@ OWNER="wuge0"
 
 # 映射：目标仓库名 | 源仓库
 map=(
-  "legado|Rimchars/legado"
+  "legado|rimvoid/legado"
   "Legado_Max|Suml-1/Legado_Max"
   "legado-huajideshutiao|huajideshutiao/legado"
   "legado_NG|joestar817/legado_NG"
@@ -23,6 +23,15 @@ map=(
   "qysg|autobcb/qysg"
   "legado-jingshiro|Jingshiro/legado"
 )
+
+# 统一注入认证头：私有仓库的 ls-remote/clone 也需要凭据，
+# 且不把 PAT 写进 URL，避免泄露到日志或错误信息里。
+auth_git() {
+  GIT_CONFIG_COUNT=1 \
+  GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+  GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')" \
+  git "$@"
+}
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -36,10 +45,10 @@ for entry in "${map[@]}"; do
   echo "--- [$tgt] <= [$src] ---"
 
   src_refs="$TMP/${tgt}.src"; tgt_refs="$TMP/${tgt}.tgt"
-  if ! git ls-remote "https://github.com/$src.git" 'refs/heads/*' 'refs/tags/*' 2>/dev/null | sort > "$src_refs"; then
+  if ! auth_git ls-remote "https://github.com/$src.git" 'refs/heads/*' 'refs/tags/*' 2>"$TMP/err" | sort > "$src_refs"; then
     echo "  源不可达，跳过"; failed=$((failed+1)); continue
   fi
-  if ! git ls-remote "https://github.com/$OWNER/$tgt.git" 'refs/heads/*' 'refs/tags/*' 2>/dev/null | sort > "$tgt_refs"; then
+  if ! auth_git ls-remote "https://github.com/$OWNER/$tgt.git" 'refs/heads/*' 'refs/tags/*' 2>"$TMP/err" | sort > "$tgt_refs"; then
     echo "  目标不可达，跳过"; failed=$((failed+1)); continue
   fi
 
@@ -48,13 +57,13 @@ for entry in "${map[@]}"; do
   fi
 
   echo "  检测到引用差异，对账同步中..."
-  if git clone --mirror "https://github.com/$src.git" "$TMP/${tgt}.git" >/dev/null 2>&1; then
+  if auth_git clone --mirror "https://github.com/$src.git" "$TMP/${tgt}.git" >/dev/null 2>&1; then
     # 删除 refs/pull 隐藏引用（GitHub 不允许推送，避免镜像 push 失败）
     git -C "$TMP/${tgt}.git" for-each-ref 'refs/pull/**' --format='delete %(refname)' \
       | git -C "$TMP/${tgt}.git" update-ref --stdin
     # --mirror 双向对账：增补源有的 / 更新落后的 / 删除目标多余分支(如已清理的 dependabot)
-    if git -C "$TMP/${tgt}.git" push --mirror \
-         "https://oauth2:${GH_TOKEN}@github.com/$OWNER/$tgt.git" >/dev/null 2>&1; then
+    if auth_git -C "$TMP/${tgt}.git" push --mirror \
+         "https://github.com/$OWNER/$tgt.git" >/dev/null 2>&1; then
       echo "  同步完成（双向对齐，含删除目标多余分支）"; synced=$((synced+1))
     else
       echo "  同步失败"; failed=$((failed+1))
