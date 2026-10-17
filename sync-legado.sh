@@ -39,6 +39,12 @@ auth_git() {
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# actions/checkout 会在仓库本地配置里留一个 http.extraheader(GITHUB_TOKEN)。
+# 它与我们注入的 PAT 头会拼接成两个 Authorization，GitHub 直接拒绝：
+#   remote: Duplicate header: "Authorization"
+# 这里先清掉本地那份；下面的匿名访问因此是真正的匿名，认证请求只带 PAT。
+git config --local --unset-all "http.https://github.com/.extraheader" 2>/dev/null || true
+
 # 只回显一行原因，便于排查，且不含任何凭据（URL 里从不带 token）
 diag() { [ -s "$1" ] && sed -n '1p' "$1" | sed 's/^/    原因: /' || true; }
 
