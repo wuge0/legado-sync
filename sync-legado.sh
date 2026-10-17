@@ -24,7 +24,10 @@ map=(
   "legado-jingshiro|Jingshiro/legado"
 )
 
-# 统一注入认证头：私有仓库的 ls-remote/clone 也需要凭据，
+# secret 误带空白/换行会让 Authorization 头非法（401），先清干净
+GH_TOKEN="${GH_TOKEN//[[:space:]]/}"
+
+# 统一注入认证头：私有仓库的 ls-remote/clone/push 都需要凭据，
 # 且不把 PAT 写进 URL，避免泄露到日志或错误信息里。
 auth_git() {
   GIT_CONFIG_COUNT=1 \
@@ -36,6 +39,31 @@ auth_git() {
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# 只回显一行原因，便于排查，且不含任何凭据（URL 里从不带 token）
+diag() { [ -s "$1" ] && sed -n '1p' "$1" | sed 's/^/    原因: /' || true; }
+
+# 先匿名访问（公开仓库的常规路径），失败再用 PAT 重试（私有仓库）。
+# 这样即使 PAT 失效，也不会把所有公开仓库一起判成"源不可达"。
+ls_refs() { # $1=url $2=输出文件
+  local url="$1" out="$2"
+  if git ls-remote "$url" 'refs/heads/*' 'refs/tags/*' 2>"$TMP/err" | sort > "$out"; then
+    return 0
+  fi
+  if auth_git ls-remote "$url" 'refs/heads/*' 'refs/tags/*' 2>"$TMP/err" | sort > "$out"; then
+    return 0
+  fi
+  diag "$TMP/err"
+  return 1
+}
+
+clone_mirror() { # $1=url $2=目录
+  if git clone --mirror "$1" "$2" >/dev/null 2>"$TMP/err"; then return 0; fi
+  rm -rf "$2"
+  if auth_git clone --mirror "$1" "$2" >/dev/null 2>"$TMP/err"; then return 0; fi
+  diag "$TMP/err"
+  return 1
+}
+
 synced=0; skipped=0; failed=0
 echo "===== Legado 镜像统一同步 $(date -u '+%Y-%m-%d %H:%M UTC') ====="
 
@@ -45,10 +73,10 @@ for entry in "${map[@]}"; do
   echo "--- [$tgt] <= [$src] ---"
 
   src_refs="$TMP/${tgt}.src"; tgt_refs="$TMP/${tgt}.tgt"
-  if ! auth_git ls-remote "https://github.com/$src.git" 'refs/heads/*' 'refs/tags/*' 2>"$TMP/err" | sort > "$src_refs"; then
+  if ! ls_refs "https://github.com/$src.git" "$src_refs"; then
     echo "  源不可达，跳过"; failed=$((failed+1)); continue
   fi
-  if ! auth_git ls-remote "https://github.com/$OWNER/$tgt.git" 'refs/heads/*' 'refs/tags/*' 2>"$TMP/err" | sort > "$tgt_refs"; then
+  if ! ls_refs "https://github.com/$OWNER/$tgt.git" "$tgt_refs"; then
     echo "  目标不可达，跳过"; failed=$((failed+1)); continue
   fi
 
@@ -57,16 +85,16 @@ for entry in "${map[@]}"; do
   fi
 
   echo "  检测到引用差异，对账同步中..."
-  if auth_git clone --mirror "https://github.com/$src.git" "$TMP/${tgt}.git" >/dev/null 2>&1; then
+  if clone_mirror "https://github.com/$src.git" "$TMP/${tgt}.git"; then
     # 删除 refs/pull 隐藏引用（GitHub 不允许推送，避免镜像 push 失败）
     git -C "$TMP/${tgt}.git" for-each-ref 'refs/pull/**' --format='delete %(refname)' \
       | git -C "$TMP/${tgt}.git" update-ref --stdin
     # --mirror 双向对账：增补源有的 / 更新落后的 / 删除目标多余分支(如已清理的 dependabot)
     if auth_git -C "$TMP/${tgt}.git" push --mirror \
-         "https://github.com/$OWNER/$tgt.git" >/dev/null 2>&1; then
+         "https://github.com/$OWNER/$tgt.git" >/dev/null 2>"$TMP/err"; then
       echo "  同步完成（双向对齐，含删除目标多余分支）"; synced=$((synced+1))
     else
-      echo "  同步失败"; failed=$((failed+1))
+      echo "  同步失败"; diag "$TMP/err"; failed=$((failed+1))
     fi
   else
     echo "  克隆源失败"; failed=$((failed+1))
